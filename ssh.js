@@ -32,7 +32,7 @@ function() {
 				// console.log(event, path)
 
 				// console.log(sftp);
-				let path = '../Pure.MVC/Views/test/'
+				let path = '../Pure.MVC/Views/assets'
 				let event = 'unlinkDir'
 				let remotePath = sshConfig.remoteViewsFolderPath + path.replace(sshConfig.localViewsFolderPath, '')
 				// console.log(sftp.get(remotePath));
@@ -95,32 +95,101 @@ function CreateRemoteDirs(generator){
 
 
 
-function DeleteRemoteFiles(path){
-	console.log(path);
-	sftp.readdir(path, (err, list) => {
+// function DeleteRemoteFiles(path){
+// 	console.log(path);
+// 	let folders = [];
+// 	sftp.readdir(path, (err, list) => {
+// 		if (err) throw err;
+//
+// 		console.log(list);
+// 		if(!list.length){
+// 			sftp.rmdir(path);
+// 			return;
+// 		}
+//
+// 		for (var i = 0; i < list.length; i++) {
+// 			if(list[i].filename.indexOf('.') === -1){
+// 				console.log('found folder '+path + '/' +list[i].filename+', do check it out');
+// 				folders.push(path + '/' +list[i].filename);
+// 				DeleteRemoteFiles(path + '/' +list[i].filename);
+// 			}
+// 			else {
+// 				console.log('found file '+path + '/' +list[i].filename+', remove it');
+// 				sftp.unlink(path + '/' +list[i].filename, function(err) {
+// 					if (err) throw err;
+// 				});
+// 			}
+// 		}
+//
+// 		console.log('folders', folders);
+// 	})
+// }
 
-		console.log(list);
-		for (var i = 0; i < list.length; i++) {
-			if(list[i].filename.indexOf('.') === -1){
-				DeleteRemoteFiles(path + '/' +list[i].filename);
+async function GetFileList(path){
+	return new Promise((resolve, reject) => {
+		sftp.readdir(path, (err, list) => {
+			if (err) throw err;
+			resolve({"path": path, "list": list});
+		})
+	})
+}
+
+async function UnlinkFile(){
+	return new Promise((resolve, reject) => {
+		sftp.unlink(path + '/' +list[i].filename, (err) => {
+			if (err) throw err;
+			resolve();
+		});
+	})
+}
+
+
+
+function DeleteRemoteFiles(path){
+	let folders = [];
+
+	return new Promise((resolve, reject) => {
+		async function RunList({path, list}){
+			// console.log('list', list);
+
+			let folders = [];
+			if(!list.length){
+				sftp.rmdir(path);
+			}
+
+			for (let i = 0; i < list.length; i++) {
+				if(list[i].filename.indexOf('.') === -1){
+					// console.log('found folder '+path + '/' +list[i].filename+', do check it out');
+					folders.push(path + '/' +list[i].filename);
+					// GetFileList(path + '/' +list[i].filename).then(list => RunList(list))
+				}
+				else {
+					// console.log('found file '+path + '/' +list[i].filename+', remove it');
+					// await UnlinkFile();
+					sftp.unlink(path + '/' +list[i].filename, (err) => {
+						if (err) throw err;
+					});
+				}
+			}
+
+			if(!folders.length){
+
 			}
 			else {
-				sftp.unlink(path + '/' +list[i].filename, function(err) {
-					if (err) throw err;
-				});
+				for (let i = 0; i < folders.length; i++) {
+		        // wait for the promise to resolve before advancing the for loop
+		        await GetFileList(folders[i]).then(list => RunList(list))
+		        console.log(i);
+		    }
 			}
-		}
-		// if(err) {
-		// 	sftp.mkdir(yeildVal.value, function(err, list) {
-		// 		if (err) throw err;
-		// 		gnFn.next();
-		// 	});
-		// }
-		// else {
-		// 	gnFn.next();
-		// }
-	})
 
+		}
+
+
+
+		GetFileList(path).then(list => RunList(list))
+
+	});
 }
 
 
@@ -158,7 +227,9 @@ function RunQueue(generator) {
 						}
 					)
 				} else if (result.value.event === 'unlinkDir') {
-					DeleteRemoteFiles(result.value.remotePath);
+					DeleteRemoteFiles(result.value.remotePath).then(() => {
+						console.log('DONE DELETING');
+					});
 				}
 
 
