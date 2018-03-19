@@ -1,341 +1,375 @@
-let chokidar = require('chokidar');
-let SSH2 = require('ssh2');
-let conn = new SSH2.Client();
-let fs = require('fs');
+const chokidar = require('chokidar');
+const SSH2 = require('ssh2');
+const conn = new SSH2.Client();
+const fs = require('fs');
+const { exec } = require('child_process');
 
-let sshConfig = JSON.parse(fs.readFileSync('./ssh.config.json'));
-let sftpConfig = {
-	"host": sshConfig.host,
-	"username": sshConfig.username,
-	"password": sshConfig.password,
-	"port": sshConfig.port,
-	"tryKeyboard": true,
+const SSH_CONFIG = JSON.parse(fs.readFileSync('./ssh.config.json'));
+const SFTP_CONFIG = {
+	'host': SSH_CONFIG.host,
+	'username': SSH_CONFIG.username,
+	'password': SSH_CONFIG.password,
+	'port': SSH_CONFIG.port,
+	'tryKeyboard': true,
 	// "debug": console.log
 }
 
-let queue = []
-let queueIsRunning = false
-let sftp = null
+let QUEUE = []
+let SFTP = null
+let IS_RUNNING_QUEUE = false
 
-console.log('\033[2J');
+function LOG(identity, data){
+	if(SSH_CONFIG.log){
+		console.log('LOG: ' + identity, (data ? data : ''));
+	}
+}
 
-conn.on('ready',
-function() {
-  console.log('Client :: ready');
-  conn.sftp(function(err, client) {
-		sftp = client
-    if (err) throw err;
+async function ReadDir(path){
+	return new Promise((resolve, reject) => {
+		SFTP.readdir(path, (err, list) => {
+			if (err) reject()
+			resolve({'path': path, 'list': list})
+		})
+	})
+}
 
-			// chokidar.watch(sshConfig.localViewsFolderPath,{
-			// 	ignoreInitial: true,
-			// }).on('all', (event, path) => {
-				// console.log(event, path)
+async function CheckDirExists(path){
+	return new Promise((resolve, reject) => {
+		SFTP.readdir(path, (err, list) => {
+			if (err) reject()
+			resolve()
+		})
+	})
+}
 
-				// console.log(sftp);
-				let path = '../Pure.MVC/Views/assets'
-				let event = 'unlinkDir'
-				let remotePath = sshConfig.remoteViewsFolderPath + path.replace(sshConfig.localViewsFolderPath, '')
-				// console.log(sftp.get(remotePath));
-				queue.push({
-					"event": event,
-					"path": path,
-					"remotePath": remotePath
-				});
+async function CheckFileExists(path){
+	return new Promise((resolve, reject) => {
+		SFTP.stat(path, (err, list) => {
+			if (err) reject()
+			resolve()
+		})
+	})
+}
 
-				if(!queueIsRunning){
-					queueIsRunning = true
-					RunQueue(function* () {
-						for (var i = queue.length - 1; i > -1; i--) {
-							yield queue[i]
-						}
-					});
-				}
-
-
-
-			// });
-  });
-}).on('error',
-	err => console.log('ERROR ', err)
-).on('end',
-	err => console.log('ENDED')
-).on('close',
-	hadError => console.log('HADERROR ', hadError)
-).connect(sftpConfig)
+async function Unlink(path){
+	return new Promise((resolve, reject) => {
+		CheckFileExists(path)
+			.then(() => {
+				SFTP.unlink(path, (err) => {
+					// if (err) throw err;
+					resolve()
+				})
+			})
+			.catch(() => resolve())
+	})
+}
 
 
+async function Rmdir(path){
+	return new Promise((resolve, reject) => {
+		CheckDirExists(path)
+			.then(() => {
+				SFTP.rmdir(path, (err) => {
+					LOG('rmdir err ', err);
+					resolve()
+				})
+			})
+			.catch(() => resolve())
+	})
+}
 
+
+async function Put(localPath, remotePath){
+	return new Promise((resolve, reject) => {
+		CheckFileExists(remotePath)
+			.then(() => resolve())
+			.catch(() => {
+				SFTP.fastPut(localPath, remotePath, {}, (err) => {
+					LOG('add err ', err);
+					resolve();
+				})
+			})
+	})
+}
+
+async function Mkdir(path) {
+	return new Promise((resolve, reject) => {
+		CheckDirExists(path)
+			.then(() => resolve())
+			.catch(() => {
+				SFTP.mkdir(path, (err) => {
+					LOG('mkdir err ', err);
+					resolve();
+				})
+			})
+	})
+}
 
 
 function CreateRemoteDirs(generator){
-	var gnFn = generator.apply(this, arguments);
+	let gnFn = generator.apply(this, arguments);
 
-	function handle(yeildVal) {
-		console.log(yeildVal);
-		sftp.readdir(yeildVal.value, (err) => {
-			console.log('dwaiuhwaiuh');
-			if(err) {
-				sftp.mkdir(yeildVal.value, function(err, list) {
-					if (err) throw err;
-					gnFn.next();
-				});
-			}
-			else {
-				gnFn.next();
-			}
-		})
+	function handle(yieldVal) {
+		LOG('yieldVal', yieldVal);
+		CheckDirExists(yieldVal.value)
+			.then(() => gnFn.next())
+			.catch(() => Mkdir(yieldVal.value)
+				.then(() => gnFn.next())
+			)
 	}
 
-	try {
+	// try {
 		return handle(gnFn.next());
-	} catch (ex) {
-		return Promise.reject(ex);
-	}
+	// } catch (ex) {
+	// 	return Promise.reject(ex);
+	// }
 }
 
 
 
-// function DeleteRemoteFiles(path){
-// 	console.log(path);
-// 	let folders = [];
-// 	sftp.readdir(path, (err, list) => {
-// 		if (err) throw err;
-//
-// 		console.log(list);
-// 		if(!list.length){
-// 			sftp.rmdir(path);
-// 			return;
-// 		}
-//
-// 		for (var i = 0; i < list.length; i++) {
-// 			if(list[i].filename.indexOf('.') === -1){
-// 				console.log('found folder '+path + '/' +list[i].filename+', do check it out');
-// 				folders.push(path + '/' +list[i].filename);
-// 				DeleteRemoteFiles(path + '/' +list[i].filename);
-// 			}
-// 			else {
-// 				console.log('found file '+path + '/' +list[i].filename+', remove it');
-// 				sftp.unlink(path + '/' +list[i].filename, function(err) {
-// 					if (err) throw err;
-// 				});
-// 			}
-// 		}
-//
-// 		console.log('folders', folders);
-// 	})
-// }
+function DeleteRemoteFiles(startPath){
+	let SubFolders = [];
 
-async function GetFileList(path){
-	return new Promise((resolve, reject) => {
-		sftp.readdir(path, (err, list) => {
-			if (err) throw err;
-			resolve({"path": path, "list": list});
-		})
-	})
-}
-
-async function UnlinkFile(){
-	return new Promise((resolve, reject) => {
-		sftp.unlink(path + '/' +list[i].filename, (err) => {
-			if (err) throw err;
-			resolve();
-		});
-	})
-}
-
-
-
-function DeleteRemoteFiles(path){
-	let folders = [];
-
-	return new Promise((resolve, reject) => {
-		async function RunList({path, list}){
+	return new Promise((resolve1, reject1) => {
+		function RunList({path, list}){
 			// console.log('list', list);
+			return new Promise((resolve2, reject2) => {
+				let folders = [];
+				// console.log('list', list);
+				for (let i = 0; i < list.length; i++) {
+					if(list[i].filename.indexOf('.') === -1){
+						// console.log('found folder '+path + '/' +list[i].filename+', do check it out');
+						SubFolders.push(path + '/' +list[i].filename);
+						folders.push(
+							new Promise((resolve3, reject3) => {
+								ReadDir(path + '/' +list[i].filename)
+									.then(res => RunList(res).then(() => {
+										// console.log('resolve3', path + '/' +list[i].filename)
+										resolve3()
+									}))
+									.catch(res => resolve3())
+							})
+						)
+					}
+					else {
+						// console.log('found file '+path + '/' +list[i].filename+', remove it');
+						Unlink(path + '/' +list[i].filename).then(() => true)
+					}
+				}
 
-			let folders = [];
-			if(!list.length){
-				sftp.rmdir(path);
-			}
-
-			for (let i = 0; i < list.length; i++) {
-				if(list[i].filename.indexOf('.') === -1){
-					// console.log('found folder '+path + '/' +list[i].filename+', do check it out');
-					folders.push(path + '/' +list[i].filename);
-					// GetFileList(path + '/' +list[i].filename).then(list => RunList(list))
+				// console.log('folders', folders);
+				if(!folders.length){
+					// console.log('resolve2', 'empty-folder')
+					resolve2();
 				}
 				else {
-					// console.log('found file '+path + '/' +list[i].filename+', remove it');
-					// await UnlinkFile();
-					sftp.unlink(path + '/' +list[i].filename, (err) => {
-						if (err) throw err;
-					});
+					Promise.all(folders).then(() => {
+						// console.log('resolve2', folders)
+						resolve2();
+					})
 				}
-			}
-
-			if(!folders.length){
-
-			}
-			else {
-				for (let i = 0; i < folders.length; i++) {
-		        // wait for the promise to resolve before advancing the for loop
-		        await GetFileList(folders[i]).then(list => RunList(list))
-		        console.log(i);
-		    }
-			}
-
+			})
 		}
 
+		ReadDir(startPath)
+			.then(res => RunList(res).then(() => {
+				LOG('DELETING FOLDERS');
+				LOG(SubFolders);
+				let SubFolderPromises = [];
+				SubFolders.sort((a, b) => {
+					aSlashes = a.split('/').length;
+					bSlashes = b.split('/').length;
 
+					if ( bSlashes > aSlashes ) { return  1; }
+			    if ( aSlashes > bSlashes ) { return -1; }
+			    return 0;
+				})
+				.push(startPath)
 
-		GetFileList(path).then(list => RunList(list))
+				Promise.all(
+					SubFolders.map(path => new Promise((res, rej) => Rmdir(path).then(() => res()) ))
+				).then(() => resolve1())
+			}))
+			.catch(res => resolve1())
 
 	});
 }
 
 
-function RunQueue(generator) {
-	var gnFn = generator.apply(this, arguments);
 
-	function handle(result){
-		console.log('result', result);
-		if (result.done) return Promise.resolve(result.value);
+function DoEvent({event, path, remotePath}) {
+	return new Promise((resolve, reject) => {
+		if(event === 'add' || event === 'addDir'){
+			let foldersInPath = remotePath.replace(SSH_CONFIG.remoteViewsFolderPath, '').split('/')
+			foldersInPath = foldersInPath.length === 1 ? foldersInPath : foldersInPath.slice(0, -1)
+			LOG('foldersInPath', foldersInPath);
+			CreateRemoteDirs(function* (){
+				let path = SSH_CONFIG.remoteViewsFolderPath.substr(SSH_CONFIG.remoteViewsFolderPath.length - 1) === '/' ?
+					SSH_CONFIG.remoteViewsFolderPath.slice(0,-1) :
+						SSH_CONFIG.remoteViewsFolderPath;
 
+				for (let i = 0; i < foldersInPath.length; i++) {
+					path += '/' + foldersInPath[i];
+					yield path
+				}
+			})
 
-				if(result.value.event === 'add' || result.value.event === 'addDir'){
-					let foldersInPath = result.value.remotePath.replace(sshConfig.remoteViewsFolderPath, '').split('/').slice(0, -1);
-					console.log(foldersInPath);
-					CreateRemoteDirs(function* (){
-						let path = sshConfig.remoteViewsFolderPath.substr(sshConfig.remoteViewsFolderPath.length - 1) === '/' ?
-							sshConfig.remoteViewsFolderPath.slice(0,-1) :
-								sshConfig.remoteViewsFolderPath;
-
-						for (var i = 0; i < foldersInPath.length; i++) {
-							path += '/' + foldersInPath[i];
-							yield path
-						}
+			if(event === 'add'){
+				LOG('DO PUT');
+				Put(path, remotePath).then(() => {
+					LOG('NEXT PUT');
+					resolve();
+				})
+			} else {
+				LOG('DO MKDIR');
+				CheckDirExists(remotePath)
+					.then(() => {
+						LOG('DIR EXISTS -> NEXT MKDIR');
+						resolve();
 					})
-
-					DoFileAction(result.value.remotePath)
-					.then(
-						() => {
-							// queue.pop();
-							handle(gnFn.next())
-						},
-						(err) => {
-							console.log('DoFileAction', err);
-							handle(gnFn.throw(err))
-						}
+					.catch(res => Mkdir(remotePath)
+						.then(() => {
+							resolve();
+						})
 					)
-				} else if (result.value.event === 'unlinkDir') {
-					DeleteRemoteFiles(result.value.remotePath).then(() => {
-						console.log('DONE DELETING');
-					});
+			}
+
+		} else if (event === 'unlinkDir') {
+			LOG('DO DELETE UNLINKDIR');
+			DeleteRemoteFiles(remotePath).then(() => {
+				LOG('DONE DELETING FOLDER');
+				resolve();
+			});
+		} else if (event === 'unlink') {
+			LOG('DO DELETE UNLINK');
+			Unlink(remotePath).then(() => {
+				LOG('DONE DELETING FILE');
+				resolve();
+			});
+		}
+	})
+}
+
+
+function RunQueue(generator) {
+	return new Promise(function(resolve, reject) {
+		var gnFn = generator.apply(this,arguments);
+
+		function handle(res){
+			console.log('res', res)
+			let clone = {...res}
+			if(res.done) resolve()
+
+			DoEvent({
+				'event': clone.value.event,
+				'path': clone.value.path,
+				'remotePath': clone.value.remotePath
+			})
+			.then(() => {
+				console.log('DONE ' + clone.value.event + ': ', clone.value.path.slice(3))
+				console.log('gnFn.done', gnFn.done);
+				handle(gnFn.next())
+			})
+		}
+		handle(gnFn.next())
+	});
+}
+
+function CheckQueue () {
+	RunQueue(function* (){
+		while(QUEUE.length){
+			LOG('QUEUE.length', QUEUE.length)
+			LOG('QUEUE ITEM', QUEUE[QUEUE.length - 1])
+			yield QUEUE[QUEUE.length - 1]
+			QUEUE.pop();
+		}
+	})
+	.then(() => {
+		LOG('CheckQueue AGAIN')
+		LOG('QUEUE', QUEUE)
+		if(QUEUE.length){
+			CheckQueue()
+		} else {
+			IS_RUNNING_QUEUE = false;
+		}
+	})
+}
+
+console.log('\033[2J');
+conn.on('ready',
+	() => {
+	  console.log('Client :: ready');
+
+		let query = 'cd ' + SSH_CONFIG.remoteViewsFolderPath.slice(1).replace(/\//g, '\\') + ' && git branch';
+		console.log(query);
+
+		conn.sftp(function(err, client) {
+			SFTP = client
+			if (err) throw err;
+
+
+			conn.exec(query, function exec(err, stream) {
+				if (err) throw err;
+
+				stream.on('close', function close(code, signal) {
+					// console.log('Stream :: close :: code: ' + code + ', signal: ' + signal);
+					// conn.end();
+				});
+
+				stream.on('data', function out(data) {
+					// console.log('STDOUT: ' + data);
+					let dataStr = '' + data;
+					let remoteBranch = dataStr.split('\n').find(str => str.indexOf('*') !== -1).slice(2)
+
+					console.log(remoteBranch);
+
+					// chokidar.watch(SSH_CONFIG.localViewsFolderPath,{
+					// 	ignoreInitial: true,
+					// 	ignored: (SSH_CONFIG.regexFileIgnore ? SSH_CONFIG.regexFileIgnore : '')
+					// }).on('all', (event, path) => {
+					// 	// console.log(event, path)
+					//
+					// 	let remotePath = SSH_CONFIG.remoteViewsFolderPath + path.replace(SSH_CONFIG.localViewsFolderPath, '')
+					//
+					// 	RunQueue({
+					// 		'event': event,
+					// 		'path': path,
+					// 		'remotePath': remotePath
+					// 	}).then(() => console.log('DONE ' + event + ': ', path.slice(3)))
+					// });
+				});
+
+				stream.stderr.on('data', function err(data) {
+					console.log('STDERR: ' + data);
+				});
+		 	});
+
+
+			chokidar.watch(SSH_CONFIG.localViewsFolderPath,{
+				ignoreInitial: true,
+				ignored: (SSH_CONFIG.regexFileIgnore ? SSH_CONFIG.regexFileIgnore : '')
+			}).on('all', (event, path) => {
+				// console.log(event, path)
+				let remotePath = SSH_CONFIG.remoteViewsFolderPath + path.replace(SSH_CONFIG.localViewsFolderPath, '')
+				QUEUE.push({
+					'event': event,
+					'path': path,
+					'remotePath': remotePath
+				})
+
+				if(!IS_RUNNING_QUEUE){
+					IS_RUNNING_QUEUE = true;
+					CheckQueue()
 				}
 
+			});
 
-
-		// return sftpGet.then(function (res){
-		// 	console.log('res', res);
-		// 	// return handle(gnFn.next(res));
-		// }, function (err){
-		// 	return handle(gnFn.throw(err));
-		// });
+		});
 	}
-
-	try {
-		return handle(gnFn.next());
-	} catch (ex) {
-		return Promise.reject(ex);
-	}
-}
-
-
-
-
-
-function DoFileAction(file){
-	console.log('file.event', file.event);
-	switch (file.event) {
-		case 'unlink':
-			return new Promise((resolve, reject) => {
-				sftp.unlink(file.remotePath, (err) => {
-					if(err){
-						reject(err)
-					}
-					else {
-						resolve();
-					}
-				})
-			})
-			break;
-		case 'unlinkDir':
-			return new Promise((resolve, reject) => {
-				sftp.rmdir(file.remotePath, (err) => {
-					console.log('unlinkDir', err);
-					if(err){
-						reject(err)
-					}
-					else {
-						resolve();
-					}
-				})
-			})
-			break;
-		case 'add':
-			return new Promise((resolve, reject) => {
-				sftp.fastPut(file.path, file.remotePath, {}, (err) => {
-				console.log('add err ', err);
-					if(err){
-						reject(err)
-					}
-					else {
-						resolve();
-					}
-				})
-			})
-			break;
-		case 'addDir':
-			return new Promise((resolve, reject) => {
-				sftp.mkdir(file.remotePath, (err) => {
-					if(err){
-						reject(err)
-					}
-					else {
-						resolve();
-					}
-				})
-			})
-			break;
-	}
-
-
-}
-
-
-// var Client = require('ssh2').Client;
-//
-// var connn = new Client();
-// connn.on('ready', function() {
-//   console.log('Client :: ready');
-//   connn.sftp(function(err, sftp) {
-//     // if (err) throw err;
-// 		console.log(err);
-// 		console.log(sshConfig.remoteViewsFolderPath);
-// 		// console.log(remotePath);
-//     sftp.mkdir('/C:/Projekt/pureweb-ssh/Pure.MVC/Views/test', function(err, list) {
-//       // if (err) throw err;
-// 			console.log(err);
-// 			// if (list) {
-// 			// 	console.dir(list);
-// 			// 	// connn.end();
-// 			// }
-//     });
-//   });
-// }).connect({
-// 	"host": sshConfig.host,
-// 	"username": sshConfig.username,
-// 	"password": sshConfig.password,
-// 	"port": sshConfig.port,
-// 	"tryKeyboard": true,
-// 	"debug": console.log
-// });
+).on('error',
+	err => console.log('ERROR ', err)
+).on('end',
+	err => console.log('ENDED')
+).on('close',
+	hadError => console.log('HADERROR ', hadError)
+).connect(SFTP_CONFIG)
