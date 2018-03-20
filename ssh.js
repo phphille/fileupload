@@ -1,10 +1,16 @@
-const chokidar = require('chokidar');
-const SSH2 = require('ssh2');
-const conn = new SSH2.Client();
-const fs = require('fs');
-const { exec } = require('child_process');
+const __CHOKIDAR__ = require('chokidar');
+const __SSH2__ = require('ssh2');
+const __CONN__ = new __SSH2__.Client();
+const __FS__ = require('fs');
+const __EXEC__ = require('child_process').exec;
+const __UTIL__ = require('util')
+const __PROCESS__ = require('process');
+const __CHALK__ = require('chalk');
+const __LOG_OK__ = __CHALK__.black.bgGreenBright.bold;
+const __LOG_ERR__ = __CHALK__.white.bgRed.bold;
+const __LOG_INFO__ = __CHALK__.white.bgBlue.bold;
 
-const SSH_CONFIG = JSON.parse(fs.readFileSync('./ssh.config.json'));
+const SSH_CONFIG = JSON.parse(__FS__.readFileSync('./ssh.config.json'));
 const SFTP_CONFIG = {
 	'host': SSH_CONFIG.host,
 	'username': SSH_CONFIG.username,
@@ -20,8 +26,89 @@ let IS_RUNNING_QUEUE = false
 
 function LOG(identity, data){
 	if(SSH_CONFIG.log){
-		console.log('LOG: ' + identity, (data ? data : ''));
+		console.log(`LOG: ${identity}`, (data ? data : ''));
 	}
+}
+
+function ECHO(identity, data){
+	console.log(`${identity}`, (data ? data : ''));
+}
+
+__PROCESS__.on('unhandledRejection', (reason, p) => {
+  console.log('Unhandled Rejection at:', p, 'reason:', reason);
+});
+
+async function RemoteTerminal(query, onDataFn) {
+	return new Promise((resolve, reject) => {
+		__CONN__.exec(query, (err, stream) => {
+			if (err) throw err
+
+			stream.stdout.on('data', (data) => {
+				resolve(onDataFn(''+data));
+			})
+
+			stream.stderr.on('data', (data) => {
+				ECHO(__LOG_ERR__('Command prompt err: '),  ''+data)
+				reject()
+			})
+
+		})
+	})
+}
+
+async function LocalTerminal(query, onDataFn) {
+	return new Promise((resolve, reject) => {
+		__EXEC__(query, {}, (error, stdout, stderr) => {
+			if (error !== null) {
+				ECHO(__LOG_ERR__('Check local branch error: '), '' + error);
+				reject();
+			} else {
+				resolve(onDataFn(stdout));
+			}
+		})
+	})
+}
+
+async function CheckRemoteRepo() {
+	return new Promise((resolve, reject) => {
+		let gitNameQuery = 'cd ' + SSH_CONFIG.remoteViewsFolderPath.slice(1).replace(/\//g, '\\') + ' && git config --get remote.origin.url'
+
+		ECHO('Checking remote repo:', gitNameQuery);
+		RemoteTerminal(gitNameQuery, data => data.trim().split('/').reverse()[0])
+			.then((remoteRepo) => {
+				ECHO('Remote repo is:', remoteRepo);
+				resolve(remoteRepo)
+			})
+			.catch(() => reject())
+	});
+}
+
+async function CheckRemoteBranch() {
+	return new Promise((resolve, reject) => {
+		let branchQuery = 'cd ' + SSH_CONFIG.remoteViewsFolderPath.slice(1).replace(/\//g, '\\') + ' && git branch'
+		ECHO('Checking remote branch:', branchQuery);
+		RemoteTerminal(branchQuery, (data) => ('' + data).split('\n').find(str => str.indexOf('*') !== -1).slice(2))
+			.then(remoteBranch => resolve(remoteBranch))
+			.catch(() => reject())
+	});
+}
+
+async function CheckLocalRepo (){
+	return new Promise((resolve, reject) => {
+		ECHO('Checking local repo');
+		LocalTerminal('git config --get remote.origin.url', (data) => data.trim().split('/').reverse()[0])
+			.then(repoName => resolve(repoName))
+			.catch(() => reject())
+	});
+}
+
+async function CheckLocalBranch (){
+	return new Promise((resolve, reject) => {
+		ECHO('Checking local branch');
+		LocalTerminal('git branch', (data) => ('' + data).split('\n').find(str => str.indexOf('*') !== -1).slice(2))
+			.then(repoName => resolve(repoName))
+			.catch(() => reject())
+	});
 }
 
 async function ReadDir(path){
@@ -118,11 +205,7 @@ function CreateRemoteDirs(generator){
 			)
 	}
 
-	// try {
-		return handle(gnFn.next());
-	// } catch (ex) {
-	// 	return Promise.reject(ex);
-	// }
+	handle(gnFn.next());
 }
 
 
@@ -172,24 +255,25 @@ function DeleteRemoteFiles(startPath){
 		}
 
 		ReadDir(startPath)
-			.then(res => RunList(res).then(() => {
-				LOG('DELETING FOLDERS');
-				LOG(SubFolders);
-				let SubFolderPromises = [];
-				SubFolders.sort((a, b) => {
-					aSlashes = a.split('/').length;
-					bSlashes = b.split('/').length;
+			.then(res => RunList(res)
+				.then(() => {
+					LOG('DELETING FOLDERS');
+					LOG(SubFolders);
+					let SubFolderPromises = [];
+					SubFolders.sort((a, b) => {
+						aSlashes = a.split('/').length;
+						bSlashes = b.split('/').length;
 
-					if ( bSlashes > aSlashes ) { return  1; }
-			    if ( aSlashes > bSlashes ) { return -1; }
-			    return 0;
-				})
-				.push(startPath)
+						if ( bSlashes > aSlashes ) { return  1; }
+				    if ( aSlashes > bSlashes ) { return -1; }
+				    return 0;
+					})
+					.push(startPath)
 
-				Promise.all(
-					SubFolders.map(path => new Promise((res, rej) => Rmdir(path).then(() => res()) ))
-				).then(() => resolve1())
-			}))
+					Promise.all(
+						SubFolders.map(path => new Promise((res, rej) => Rmdir(path).then(() => res()) ))
+					).then(() => resolve1())
+				}))
 			.catch(res => resolve1())
 
 	});
@@ -256,20 +340,18 @@ function RunQueue(generator) {
 		var gnFn = generator.apply(this,arguments);
 
 		function handle(res){
-			console.log('res', res)
 			let clone = {...res}
-			if(res.done) resolve()
+			if(res.done) return resolve()
 
 			DoEvent({
 				'event': clone.value.event,
 				'path': clone.value.path,
 				'remotePath': clone.value.remotePath
 			})
-			.then(() => {
-				console.log('DONE ' + clone.value.event + ': ', clone.value.path.slice(3))
-				console.log('gnFn.done', gnFn.done);
-				handle(gnFn.next())
-			})
+				.then(() => {
+					console.log('DONE ' + clone.value.event + ': ', clone.value.path.slice(3))
+					handle(gnFn.next())
+				})
 		}
 		handle(gnFn.next())
 	});
@@ -284,89 +366,78 @@ function CheckQueue () {
 			QUEUE.pop();
 		}
 	})
-	.then(() => {
-		LOG('CheckQueue AGAIN')
-		LOG('QUEUE', QUEUE)
-		if(QUEUE.length){
-			CheckQueue()
-		} else {
-			IS_RUNNING_QUEUE = false;
-		}
-	})
+		.then(() => {
+			LOG('CheckQueue AGAIN')
+			LOG('QUEUE', QUEUE)
+			if(QUEUE.length){
+				CheckQueue()
+			} else {
+				IS_RUNNING_QUEUE = false;
+			}
+		})
 }
 
+
+function WatchFiles() {
+	__CHOKIDAR__.watch(SSH_CONFIG.localViewsFolderPath,{
+		ignoreInitial: true,
+		ignored: (SSH_CONFIG.regexFileIgnore ? SSH_CONFIG.regexFileIgnore : '')
+	})
+	.on('ready', () => ECHO(__LOG_OK__('Ready for changes')))
+	.on('all', (event, path) => {
+		// console.log(event, path)
+		let remotePath = SSH_CONFIG.remoteViewsFolderPath + path.replace(SSH_CONFIG.localViewsFolderPath, '')
+		QUEUE.push({
+			'event': event,
+			'path': path,
+			'remotePath': remotePath
+		})
+
+		if(!IS_RUNNING_QUEUE){
+			IS_RUNNING_QUEUE = true;
+			CheckQueue()
+		}
+	});
+}
+
+
 console.log('\033[2J');
-conn.on('ready',
-	() => {
-	  console.log('Client :: ready');
+__CONN__.on('ready',() => {
+  ECHO('Client :: ready');
 
-		let query = 'cd ' + SSH_CONFIG.remoteViewsFolderPath.slice(1).replace(/\//g, '\\') + ' && git branch';
-		console.log(query);
+	__CONN__.sftp(function(err, client) {
+		SFTP = client
+		if (err) throw err;
 
-		conn.sftp(function(err, client) {
-			SFTP = client
-			if (err) throw err;
-
-
-			conn.exec(query, function exec(err, stream) {
-				if (err) throw err;
-
-				stream.on('close', function close(code, signal) {
-					// console.log('Stream :: close :: code: ' + code + ', signal: ' + signal);
-					// conn.end();
-				});
-
-				stream.on('data', function out(data) {
-					// console.log('STDOUT: ' + data);
-					let dataStr = '' + data;
-					let remoteBranch = dataStr.split('\n').find(str => str.indexOf('*') !== -1).slice(2)
-
-					console.log(remoteBranch);
-
-					// chokidar.watch(SSH_CONFIG.localViewsFolderPath,{
-					// 	ignoreInitial: true,
-					// 	ignored: (SSH_CONFIG.regexFileIgnore ? SSH_CONFIG.regexFileIgnore : '')
-					// }).on('all', (event, path) => {
-					// 	// console.log(event, path)
-					//
-					// 	let remotePath = SSH_CONFIG.remoteViewsFolderPath + path.replace(SSH_CONFIG.localViewsFolderPath, '')
-					//
-					// 	RunQueue({
-					// 		'event': event,
-					// 		'path': path,
-					// 		'remotePath': remotePath
-					// 	}).then(() => console.log('DONE ' + event + ': ', path.slice(3)))
-					// });
-				});
-
-				stream.stderr.on('data', function err(data) {
-					console.log('STDERR: ' + data);
-				});
-		 	});
-
-
-			chokidar.watch(SSH_CONFIG.localViewsFolderPath,{
-				ignoreInitial: true,
-				ignored: (SSH_CONFIG.regexFileIgnore ? SSH_CONFIG.regexFileIgnore : '')
-			}).on('all', (event, path) => {
-				// console.log(event, path)
-				let remotePath = SSH_CONFIG.remoteViewsFolderPath + path.replace(SSH_CONFIG.localViewsFolderPath, '')
-				QUEUE.push({
-					'event': event,
-					'path': path,
-					'remotePath': remotePath
-				})
-
-				if(!IS_RUNNING_QUEUE){
-					IS_RUNNING_QUEUE = true;
-					CheckQueue()
+		Promise.all([CheckLocalRepo(), CheckRemoteRepo()])
+			.then(resRepos => {
+				if(resRepos.every( name => name === resRepos[0])){
+					ECHO(__LOG_OK__('Repos are the same:'), resRepos[0])
+					Promise.all([CheckLocalBranch(), CheckRemoteBranch()])
+						.then(resBranches => {
+							if(resBranches.every( name => name === resBranches[0])){
+								ECHO(__LOG_OK__('Branches are the same:'), resBranches[0])
+								return WatchFiles()
+							} else {
+								ECHO(__LOG_ERR__('Branches are not the same'), resBranches);
+								__PROCESS__.exit(1)
+							}
+						})
+						.catch(() => {
+							ECHO(__LOG_ERR__('Error checking branches'))
+							__PROCESS__.exit(1)
+						})
+				} else {
+					ECHO(__LOG_ERR__('Repos are not the same'), resRepos)
+					__PROCESS__.exit(1)
 				}
-
-			});
-
-		});
-	}
-).on('error',
+			})
+			.catch(() => {
+				ECHO(__LOG_ERR__('Error checking repos'))
+				__PROCESS__.exit(1)
+			})
+	});
+}).on('error',
 	err => console.log('ERROR ', err)
 ).on('end',
 	err => console.log('ENDED')
