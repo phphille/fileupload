@@ -5,10 +5,12 @@ const __FS__ = require('fs');
 const __EXEC__ = require('child_process').exec;
 const __UTIL__ = require('util')
 const __PROCESS__ = require('process');
+const __CONFIRM__ = require('node-ask').confirm;
 const __CHALK__ = require('chalk');
 const __LOG_OK__ = __CHALK__.black.bgGreenBright.bold;
 const __LOG_ERR__ = __CHALK__.white.bgRed.bold;
 const __LOG_INFO__ = __CHALK__.white.bgBlue.bold;
+const __LOG_DEBUG__ = __CHALK__.white.bgMagenta.bold;
 
 const SSH_CONFIG = JSON.parse(__FS__.readFileSync('./ssh.config.json'));
 const SFTP_CONFIG = {
@@ -123,8 +125,12 @@ async function ReadDir(path){
 async function CheckDirExists(path){
 	return new Promise((resolve, reject) => {
 		SFTP.readdir(path, (err, list) => {
-			if (err) reject()
-			resolve()
+			if (err) {
+				LOG('FOLDER DOES NOT EXISTS')
+				return reject()
+			}
+			LOG('FOLDER DOES EXISTS')
+			return resolve()
 		})
 	})
 }
@@ -143,7 +149,6 @@ async function Unlink(path){
 		CheckFileExists(path)
 			.then(() => {
 				SFTP.unlink(path, (err) => {
-					// if (err) throw err;
 					resolve()
 				})
 			})
@@ -157,7 +162,11 @@ async function Rmdir(path){
 		CheckDirExists(path)
 			.then(() => {
 				SFTP.rmdir(path, (err) => {
-					LOG('rmdir err ', err);
+					if(err){
+						LOG('rmdir err', path)
+						LOG('rmdir err', err)
+						throw err
+					}
 					resolve()
 				})
 			})
@@ -172,7 +181,10 @@ async function Put(localPath, remotePath){
 			.then(() => resolve())
 			.catch(() => {
 				SFTP.fastPut(localPath, remotePath, {}, (err) => {
-					LOG('add err ', err);
+					LOG('fastPut', [localPath, remotePath]);
+					if(err){
+						LOG('add err', err);
+					}
 					resolve();
 				})
 			})
@@ -185,7 +197,10 @@ async function Mkdir(path) {
 			.then(() => resolve())
 			.catch(() => {
 				SFTP.mkdir(path, (err) => {
-					LOG('mkdir err ', err);
+					if(err){
+						LOG('mkdir err', path)
+						LOG('mkdir err', err)
+					}
 					resolve();
 				})
 			})
@@ -193,19 +208,29 @@ async function Mkdir(path) {
 }
 
 
-function CreateRemoteDirs(generator){
-	let gnFn = generator.apply(this, arguments);
+function CreateRemote(generator){
+	return new Promise(function(resolve, reject) {
+		let gnFn = generator()
 
-	function handle(yieldVal) {
-		LOG('yieldVal', yieldVal);
-		CheckDirExists(yieldVal.value)
-			.then(() => gnFn.next())
-			.catch(() => Mkdir(yieldVal.value)
-				.then(() => gnFn.next())
-			)
-	}
+		function handle(yieldVal) {
+			LOG('yieldVal', yieldVal)
+			if(yieldVal.done) return resolve()
 
-	handle(gnFn.next());
+			if(yieldVal.value.isFile){
+				Put(yieldVal.value.localPath, yieldVal.value.remotePath)
+					.then(() => {
+						return handle(gnFn.next())
+					})
+			} else {
+				Mkdir(yieldVal.value.remotePath)
+					.then(() => {
+						return handle(gnFn.next())
+					})
+			}
+		}
+
+		handle(gnFn.next());
+	});
 }
 
 
@@ -257,7 +282,7 @@ function DeleteRemoteFiles(startPath){
 		ReadDir(startPath)
 			.then(res => RunList(res)
 				.then(() => {
-					LOG('DELETING FOLDERS');
+					LOG('DELETING FOLDERS')
 					LOG(SubFolders);
 					let SubFolderPromises = [];
 					SubFolders.sort((a, b) => {
@@ -285,51 +310,40 @@ function DoEvent({event, path, remotePath}) {
 	return new Promise((resolve, reject) => {
 		if(event === 'add' || event === 'addDir'){
 			let foldersInPath = remotePath.replace(SSH_CONFIG.remoteViewsFolderPath, '').split('/')
-			foldersInPath = foldersInPath.length === 1 ? foldersInPath : foldersInPath.slice(0, -1)
 			LOG('foldersInPath', foldersInPath);
-			CreateRemoteDirs(function* (){
-				let path = SSH_CONFIG.remoteViewsFolderPath.substr(SSH_CONFIG.remoteViewsFolderPath.length - 1) === '/' ?
-					SSH_CONFIG.remoteViewsFolderPath.slice(0,-1) :
-						SSH_CONFIG.remoteViewsFolderPath;
 
+			CreateRemote(function* (){
+				let remtPath = SSH_CONFIG.remoteViewsFolderPath.substr(SSH_CONFIG.remoteViewsFolderPath.length - 1) === '/' ?
+					SSH_CONFIG.remoteViewsFolderPath.slice(0,-1) :
+						SSH_CONFIG.remoteViewsFolderPath
+
+				let localPath = SSH_CONFIG.localViewsFolderPath.slice(0,-1)
+				LOG('remtPath', remtPath);
+				LOG('localPath', localPath);
 				for (let i = 0; i < foldersInPath.length; i++) {
-					path += '/' + foldersInPath[i];
-					yield path
+					remtPath += '/' + foldersInPath[i]
+					localPath += '/' + foldersInPath[i]
+					yield {'remotePath': remtPath, 'localPath': localPath, isFile: (foldersInPath[i].indexOf('.') !== -1)}
 				}
 			})
-
-			if(event === 'add'){
-				LOG('DO PUT');
-				Put(path, remotePath).then(() => {
-					LOG('NEXT PUT');
+				.then(() => {
 					resolve();
 				})
-			} else {
-				LOG('DO MKDIR');
-				CheckDirExists(remotePath)
-					.then(() => {
-						LOG('DIR EXISTS -> NEXT MKDIR');
-						resolve();
-					})
-					.catch(res => Mkdir(remotePath)
-						.then(() => {
-							resolve();
-						})
-					)
-			}
-
+				.catch(() => {})
 		} else if (event === 'unlinkDir') {
 			LOG('DO DELETE UNLINKDIR');
-			DeleteRemoteFiles(remotePath).then(() => {
-				LOG('DONE DELETING FOLDER');
-				resolve();
-			});
+			DeleteRemoteFiles(remotePath)
+				.then(() => {
+					LOG('DONE DELETING FOLDER');
+					resolve();
+				});
 		} else if (event === 'unlink') {
 			LOG('DO DELETE UNLINK');
-			Unlink(remotePath).then(() => {
-				LOG('DONE DELETING FILE');
-				resolve();
-			});
+			Unlink(remotePath)
+				.then(() => {
+					LOG('DONE DELETING FILE');
+					resolve();
+				});
 		}
 	})
 }
@@ -358,34 +372,40 @@ function RunQueue(generator) {
 }
 
 function CheckQueue () {
-	RunQueue(function* (){
-		while(QUEUE.length){
-			LOG('QUEUE.length', QUEUE.length)
-			LOG('QUEUE ITEM', QUEUE[QUEUE.length - 1])
-			yield QUEUE[QUEUE.length - 1]
-			QUEUE.pop();
-		}
-	})
-		.then(() => {
-			LOG('CheckQueue AGAIN')
-			LOG('QUEUE', QUEUE)
-			if(QUEUE.length){
-				CheckQueue()
-			} else {
-				IS_RUNNING_QUEUE = false;
+	return new Promise((resolve, reject) => {
+		RunQueue(function* (){
+			while(QUEUE.length){
+				LOG('QUEUE.length', QUEUE.length)
+				LOG('QUEUE ITEM', QUEUE[0])
+				yield QUEUE[0]
+				QUEUE.shift();
 			}
 		})
+			.then(() => {
+				LOG('CheckQueue AGAIN')
+				LOG('QUEUE', QUEUE)
+				if(QUEUE.length){
+					LOG('RUN QUEUE AGAIN')
+					CheckQueue()
+				} else {
+					LOG('QUEUE IS EMPTY')
+					IS_RUNNING_QUEUE = false
+					resolve();
+				}
+			})
+	});
 }
 
 
-function WatchFiles() {
+
+function WatchFiles(dontUploadOnStart) {
 	__CHOKIDAR__.watch(SSH_CONFIG.localViewsFolderPath,{
-		ignoreInitial: true,
+		ignoreInitial: dontUploadOnStart,
 		ignored: (SSH_CONFIG.regexFileIgnore ? SSH_CONFIG.regexFileIgnore : '')
 	})
 	.on('ready', () => ECHO(__LOG_OK__('Ready for changes')))
 	.on('all', (event, path) => {
-		// console.log(event, path)
+		console.log(event, path)
 		let remotePath = SSH_CONFIG.remoteViewsFolderPath + path.replace(SSH_CONFIG.localViewsFolderPath, '')
 		QUEUE.push({
 			'event': event,
@@ -417,7 +437,26 @@ __CONN__.on('ready',() => {
 						.then(resBranches => {
 							if(resBranches.every( name => name === resBranches[0])){
 								ECHO(__LOG_OK__('Branches are the same:'), resBranches[0])
-								return WatchFiles()
+								__CONFIRM__(__LOG_INFO__('Do you want to sync local folder with remote folder before we start?(y/n)') + ' ')
+									.catch(() => {console.log('catch');})
+								  .then((cleanRemoteFolder) => {
+										console.log(cleanRemoteFolder);
+										if(cleanRemoteFolder){
+											DeleteRemoteFiles(SSH_CONFIG.remoteViewsFolderPath)
+												.then(() => {
+													Mkdir(SSH_CONFIG.remoteViewsFolderPath)
+														.then(() => {
+															return WatchFiles(false)
+														})
+												})
+												.catch()
+										}
+										else {
+											SSH_CONFIG.uploadOnStart = true;
+											return WatchFiles(true)
+										}
+								  })
+
 							} else {
 								ECHO(__LOG_ERR__('Branches are not the same'), resBranches);
 								__PROCESS__.exit(1)
@@ -438,9 +477,9 @@ __CONN__.on('ready',() => {
 			})
 	});
 }).on('error',
-	err => console.log('ERROR ', err)
+	err => console.log(__LOG_ERR__('ERROR '), err)
 ).on('end',
-	err => console.log('ENDED')
+	err => console.log(__LOG_ERR__('ENDED'))
 ).on('close',
-	hadError => console.log('HADERROR ', hadError)
+	hadError => console.log(__LOG_ERR__('HADERROR '), hadError)
 ).connect(SFTP_CONFIG)
