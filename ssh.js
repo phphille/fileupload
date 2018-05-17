@@ -19,7 +19,6 @@ const SFTP_CONFIG = {
 	'password': SSH_CONFIG.password,
 	'port': SSH_CONFIG.port,
 	'tryKeyboard': true,
-	// "debug": console.log
 }
 
 let QUEUE = []
@@ -73,7 +72,7 @@ async function LocalTerminal(query, onDataFn) {
 
 async function CheckRemoteRepo() {
 	return new Promise((resolve, reject) => {
-		let gitNameQuery = 'cd ' + SSH_CONFIG.remoteViewsFolderPath.slice(1).replace(/\//g, '\\') + ' && git config --get remote.origin.url'
+		let gitNameQuery = 'cd ' + SSH_CONFIG.paths[0].remoteFolderPath.slice(1).replace(/\//g, '\\') + ' && git config --get remote.origin.url'
 
 		ECHO('Checking remote repo:', gitNameQuery);
 		RemoteTerminal(gitNameQuery, data => data.trim().split('/').reverse()[0])
@@ -87,7 +86,7 @@ async function CheckRemoteRepo() {
 
 async function CheckRemoteBranch() {
 	return new Promise((resolve, reject) => {
-		let branchQuery = 'cd ' + SSH_CONFIG.remoteViewsFolderPath.slice(1).replace(/\//g, '\\') + ' && git branch'
+		let branchQuery = 'cd ' + SSH_CONFIG.paths[0].remoteFolderPath.slice(1).replace(/\//g, '\\') + ' && git branch'
 		ECHO('Checking remote branch:', branchQuery);
 		RemoteTerminal(branchQuery, (data) => ('' + data).split('\n').find(str => str.indexOf('*') !== -1).slice(2))
 			.then(remoteBranch => resolve(remoteBranch))
@@ -237,7 +236,7 @@ function CreateRemote(generator){
 
 function DeleteRemoteFiles(startPath){
 	let SubFolders = [];
-
+	console.log('startPath', startPath);
 	return new Promise((resolve1, reject1) => {
 		function RunList({path, list}){
 			// console.log('list', list);
@@ -306,18 +305,19 @@ function DeleteRemoteFiles(startPath){
 
 
 
-function DoEvent({event, path, remotePath}) {
+function DoEvent({event, path, remotePath, pathsObj}) {
 	return new Promise((resolve, reject) => {
+		LOG('EVENT', event);
 		if(event === 'add' || event === 'addDir'){
-			let foldersInPath = remotePath.replace(SSH_CONFIG.remoteViewsFolderPath, '').split('/')
+			let foldersInPath = remotePath.replace(pathsObj.remoteFolderPath, '').split('/')
 			LOG('foldersInPath', foldersInPath);
 
 			CreateRemote(function* (){
-				let remtPath = SSH_CONFIG.remoteViewsFolderPath.substr(SSH_CONFIG.remoteViewsFolderPath.length - 1) === '/' ?
-					SSH_CONFIG.remoteViewsFolderPath.slice(0,-1) :
-						SSH_CONFIG.remoteViewsFolderPath
+				let remtPath = pathsObj.remoteFolderPath.substr(pathsObj.remoteFolderPath.length - 1) === '/' ?
+					pathsObj.remoteFolderPath.slice(0,-1) :
+						pathsObj.remoteFolderPath
 
-				let localPath = SSH_CONFIG.localViewsFolderPath.slice(0,-1)
+				let localPath = pathsObj.localFolderPath.slice(0,-1)
 				LOG('remtPath', remtPath);
 				LOG('localPath', localPath);
 				for (let i = 0; i < foldersInPath.length; i++) {
@@ -344,6 +344,13 @@ function DoEvent({event, path, remotePath}) {
 					LOG('DONE DELETING FILE');
 					resolve();
 				});
+		} else if (event === 'change') {
+			Unlink(remotePath)
+				.then(() => {
+					LOG('DONE DELETING FILE');
+					DoEvent({event:'add', path: path, remotePath: remotePath, pathsObj: pathsObj})
+						.then(() => resolve())
+				});
 		}
 	})
 }
@@ -360,7 +367,8 @@ function RunQueue(generator) {
 			DoEvent({
 				'event': clone.value.event,
 				'path': clone.value.path,
-				'remotePath': clone.value.remotePath
+				'remotePath': clone.value.remotePath,
+				'pathsObj': clone.value.pathsObj
 			})
 				.then(() => {
 					console.log('DONE ' + clone.value.event + ': ', clone.value.path.slice(3))
@@ -388,7 +396,7 @@ function CheckQueue () {
 					LOG('RUN QUEUE AGAIN')
 					CheckQueue()
 				} else {
-					LOG('QUEUE IS EMPTY')
+					ECHO(__LOG_INFO__('QUEUE IS EMPTY'))
 					IS_RUNNING_QUEUE = false
 					resolve();
 				}
@@ -399,23 +407,31 @@ function CheckQueue () {
 
 
 function WatchFiles(dontUploadOnStart) {
-	__CHOKIDAR__.watch(SSH_CONFIG.localViewsFolderPath,{
+
+	__CHOKIDAR__.watch(SSH_CONFIG.paths.map(paths => paths.localFolderPath),{
 		ignoreInitial: dontUploadOnStart,
 		ignored: (SSH_CONFIG.regexFileIgnore ? SSH_CONFIG.regexFileIgnore : '')
 	})
 	.on('ready', () => ECHO(__LOG_OK__('Ready for changes')))
 	.on('all', (event, path) => {
 		console.log(event, path)
-		let remotePath = SSH_CONFIG.remoteViewsFolderPath + path.replace(SSH_CONFIG.localViewsFolderPath, '')
-		QUEUE.push({
-			'event': event,
-			'path': path,
-			'remotePath': remotePath
-		})
+		let pathsObj = SSH_CONFIG.paths.filter(paths => path.indexOf(paths.localFolderPath) !== -1)[0];
+		if(pathsObj){
+			let remotePath = pathsObj.remoteFolderPath + path.replace(pathsObj.localFolderPath, '')
 
-		if(!IS_RUNNING_QUEUE){
-			IS_RUNNING_QUEUE = true;
-			CheckQueue()
+			QUEUE.push({
+				'event': event,
+				'path': path,
+				'remotePath': remotePath,
+				'pathsObj': pathsObj
+			})
+
+			if(!IS_RUNNING_QUEUE){
+				IS_RUNNING_QUEUE = true;
+				CheckQueue()
+			}
+		} else {
+			ECHO(__LOG_ERR__('PATH ERR'), path)
 		}
 	});
 }
@@ -440,19 +456,32 @@ __CONN__.on('ready',() => {
 								__CONFIRM__(__LOG_INFO__('Do you want to sync local folder with remote folder before we start?(y/n)') + ' ')
 									.catch(() => {console.log('catch');})
 								  .then((cleanRemoteFolder) => {
-										console.log(cleanRemoteFolder);
 										if(cleanRemoteFolder){
-											DeleteRemoteFiles(SSH_CONFIG.remoteViewsFolderPath)
-												.then(() => {
-													Mkdir(SSH_CONFIG.remoteViewsFolderPath)
+											(function(generator){
+												let gnFn = generator();
+
+												function handle(yieldVal) {
+													LOG('yieldVal', yieldVal)
+													if(yieldVal.done) return WatchFiles(false)
+
+													DeleteRemoteFiles(yieldVal.value.remoteFolderPath)
 														.then(() => {
-															return WatchFiles(false)
+															Mkdir(yieldVal.value.remoteFolderPath)
+																.then(() => {
+																	handle(gnFn.next());
+																})
 														})
-												})
-												.catch()
+														.catch()
+												}
+
+												handle(gnFn.next());
+											})(function* (){
+												for (var i = 0; i < SSH_CONFIG.paths.length; i++) {
+													yield SSH_CONFIG.paths[i];
+												}
+											});
 										}
 										else {
-											SSH_CONFIG.uploadOnStart = true;
 											return WatchFiles(true)
 										}
 								  })
